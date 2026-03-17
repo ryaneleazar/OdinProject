@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  odin:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - workspace:/workspace
+      - odin-logs:/app/logs
+      - ~/.claude:/root/.claude:ro
+    mem_limit: 8g
+    cpus: 4
+
+volumes:
+  workspace:
+  odin-logs:
