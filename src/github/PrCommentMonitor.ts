@@ -69,24 +69,34 @@ export class PrCommentMonitor {
           (c) => c.id > info.lastCheckedCommentId
         );
 
-        if (newComments.length === 0) continue;
+        if (newComments.length > 0) {
+          // New comments found — update tracking but don't trigger yet.
+          // Reset the cooldown timer so we wait for reviewers to finish commenting.
+          const latestComment = newComments[newComments.length - 1];
+          info.lastCheckedCommentId = latestComment.id;
+          info.lastCommentAt = new Date(latestComment.createdAt);
+          log.debug(
+            { prNumber, newComments: newComments.length },
+            "New comments detected, starting cooldown"
+          );
+          continue;
+        }
 
-        const latestComment = newComments[newComments.length - 1];
-        info.lastCheckedCommentId = latestComment.id;
-        info.lastCommentAt = new Date(latestComment.createdAt);
-
-        // Wait for cooldown period after last comment before addressing
+        // No new comments — check if cooldown has elapsed since the last comment
         const timeSinceLastComment =
           Date.now() - info.lastCommentAt.getTime();
         if (timeSinceLastComment >= cooldownMs) {
-          log.info(
-            { prNumber, newComments: newComments.length },
-            "Cooldown elapsed, addressing feedback"
-          );
-          eventBus.emit("ticket:addressingFeedback", {
-            ticketId: info.ticketId,
-            prNumber,
-          });
+          // Only trigger if there were comments we haven't addressed yet
+          if (info.lastCheckedCommentId > 0) {
+            log.info(
+              { prNumber },
+              "Cooldown elapsed, addressing feedback"
+            );
+            eventBus.emit("ticket:addressingFeedback", {
+              ticketId: info.ticketId,
+              prNumber,
+            });
+          }
         } else {
           log.debug(
             { prNumber, remainingMs: cooldownMs - timeSinceLastComment },

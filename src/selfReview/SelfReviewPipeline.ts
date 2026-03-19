@@ -34,11 +34,10 @@ export class SelfReviewPipeline {
       }
 
       // Run checks
-      const lintErrors = await this.runLint(worktreePath);
-      const typeErrors = await this.runTypeCheck(worktreePath);
+      const lintErrors = await this.runLintAndTypeCheck(worktreePath);
       const testErrors = await this.runTests(worktreePath);
 
-      const hasErrors = lintErrors || typeErrors || testErrors;
+      const hasErrors = lintErrors || testErrors;
 
       if (!hasErrors) {
         // Use Haiku for quick AI review (cheap)
@@ -46,7 +45,6 @@ export class SelfReviewPipeline {
           prompt: selfReviewPrompt({
             changedFiles,
             lintErrors: undefined,
-            typeErrors: undefined,
             testErrors: undefined,
           }),
           workingDir: worktreePath,
@@ -65,22 +63,19 @@ export class SelfReviewPipeline {
           prompt: selfReviewPrompt({
             changedFiles,
             lintErrors: lintErrors || undefined,
-            typeErrors: typeErrors || undefined,
             testErrors: testErrors || undefined,
           }),
           workingDir: worktreePath,
         });
       }
 
-      if (lintErrors) errors.push(`Lint: ${lintErrors}`);
-      if (typeErrors) errors.push(`Types: ${typeErrors}`);
+      if (lintErrors) errors.push(`Lint/Types: ${lintErrors}`);
       if (testErrors) errors.push(`Tests: ${testErrors}`);
     }
 
-    const finalLint = await this.runLint(worktreePath);
-    const finalTypes = await this.runTypeCheck(worktreePath);
+    const finalLint = await this.runLintAndTypeCheck(worktreePath);
     const finalTests = await this.runTests(worktreePath);
-    const passed = !finalLint && !finalTypes && !finalTests;
+    const passed = !finalLint && !finalTests;
 
     log.info({ passed, iterations: MAX_ITERATIONS }, "Self-review complete");
     return { passed, iterations: MAX_ITERATIONS, errors };
@@ -103,18 +98,13 @@ export class SelfReviewPipeline {
     }
   }
 
-  private async runLint(cwd: string): Promise<string | null> {
+  private async runLintAndTypeCheck(cwd: string): Promise<string | null> {
     try {
       await exec("npx", ["tsc", "--noEmit"], { cwd, timeout: 60000 });
       return null;
     } catch (err: any) {
       return err.stdout || err.message;
     }
-  }
-
-  private async runTypeCheck(cwd: string): Promise<string | null> {
-    // Already covered by tsc --noEmit in lint
-    return null;
   }
 
   private async runTests(cwd: string): Promise<string | null> {

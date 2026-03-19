@@ -14,6 +14,7 @@ import {
 } from "./TicketStateMachine.js";
 import { eventBus } from "../utils/eventBus.js";
 import { createChildLogger } from "../utils/logger.js";
+import { StateStore } from "../utils/stateStore.js";
 import { getConfig } from "../config.js";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -29,6 +30,7 @@ export class Orchestrator {
   private prMonitor: PrCommentMonitor;
   private agent: AgentService;
   private selfReview: SelfReviewPipeline;
+  private stateStore: StateStore;
   private activeTickets = new Map<string, TicketContext>();
   private config = getConfig();
 
@@ -40,10 +42,78 @@ export class Orchestrator {
     this.prMonitor = new PrCommentMonitor(this.github);
     this.agent = new AgentService();
     this.selfReview = new SelfReviewPipeline(this.agent);
+    this.stateStore = new StateStore();
+  }
+
+  private async persistState() {
+    await this.stateStore.save(this.activeTickets);
+  }
+
+  private async setTicket(ticketId: string, ctx: TicketContext) {
+    this.activeTickets.set(ticketId, ctx);
+    await this.persistState();
+  }
+
+  private async removeTicket(ticketId: string) {
+    this.activeTickets.delete(ticketId);
+    await this.persistState();
+  }
+
+  private async recoverState() {
+    const saved = await this.stateStore.load();
+    if (saved.size === 0) return;
+
+    log.info({ count: saved.size }, "Recovering saved state");
+
+    for (const [ticketId, ctx] of saved) {
+      switch (ctx.state) {
+        // Mid-implementation states: clean up and let the poller re-discover them
+        case "Queued":
+        case "Implementing":
+        case "WritingTests":
+        case "SelfReviewing":
+        case "CreatingPR":
+          log.info(
+            { ticketId, state: ctx.state },
+            "Cleaning up interrupted ticket — will be re-picked up by poller"
+          );
+          await this.git.removeWorktree(ctx.branchName);
+          this.poller.releaseTicket(ticketId);
+          break;
+
+        // PR already exists on GitHub: re-attach the monitor
+        case "AwaitingReview":
+        case "AddressingFeedback":
+          if (ctx.prNumber) {
+            log.info(
+              { ticketId, prNumber: ctx.prNumber, state: ctx.state },
+              "Re-attaching PR monitor for recovered ticket"
+            );
+            this.activeTickets.set(ticketId, { ...ctx, state: "AwaitingReview" });
+            this.poller.claimTicket(ticketId);
+            this.prMonitor.watch(ticketId, ctx.prNumber);
+          } else {
+            log.warn({ ticketId }, "AwaitingReview ticket has no PR number, cleaning up");
+            await this.git.removeWorktree(ctx.branchName);
+          }
+          break;
+
+        // Terminal states: just clean up
+        case "Failed":
+        case "Completed":
+          log.info({ ticketId, state: ctx.state }, "Cleaning up terminal ticket");
+          await this.git.removeWorktree(ctx.branchName);
+          break;
+      }
+    }
+
+    await this.persistState();
+    log.info("State recovery complete");
   }
 
   async start() {
     await this.git.init();
+    await this.recoverState();
 
     // Listen for new tickets
     eventBus.on("ticket:new", (data) => {
@@ -107,12 +177,12 @@ export class Orchestrator {
       feedbackRounds: 0,
     };
 
-    this.activeTickets.set(ticketId, ctx);
+    await this.setTicket(ticketId, ctx);
 
     try {
       // Move to In Progress
       ctx = transition(ctx, "Implementing");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
       await this.statusUpdater.moveToInProgress(ticketId);
 
       // Implement with escalation (Haiku first, Sonnet if needed)
@@ -126,7 +196,7 @@ export class Orchestrator {
 
       // Write tests
       ctx = transition(ctx, "WritingTests");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
 
       const changedFiles = await this.getChangedFiles(worktreePath);
       await this.agent.queryWithEscalation({
@@ -140,7 +210,7 @@ export class Orchestrator {
 
       // Self-review
       ctx = transition(ctx, "SelfReviewing");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
 
       const reviewResult = await this.selfReview.run(worktreePath);
 
@@ -157,7 +227,7 @@ export class Orchestrator {
 
       // Create PR
       ctx = transition(ctx, "CreatingPR");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
 
       // Commit format: [Type][VIS-123] Description (matches valhalla convention)
       const commitType = this.detectCommitType(title);
@@ -175,7 +245,7 @@ export class Orchestrator {
 
       ctx = { ...ctx, prNumber };
       ctx = transition(ctx, "AwaitingReview");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
 
       // Update Linear to In Review
       await this.statusUpdater.moveToInReview(ticketId);
@@ -187,7 +257,7 @@ export class Orchestrator {
     } catch (err) {
       log.error({ err, ticketId }, "Failed to process ticket");
       ctx = transition(ctx, "Failed");
-      this.activeTickets.set(ticketId, ctx);
+      await this.setTicket(ticketId, ctx);
       await this.statusUpdater.addComment(
         ticketId,
         `Odin failed to implement this ticket: ${err instanceof Error ? err.message : String(err)}`
@@ -204,9 +274,10 @@ export class Orchestrator {
     try {
       let updatedCtx = transition(ctx, "AddressingFeedback");
       updatedCtx.feedbackRounds++;
-      this.activeTickets.set(ticketId, updatedCtx);
+      await this.setTicket(ticketId, updatedCtx);
 
       const comments = await this.github.getPRComments(prNumber);
+      // Filter out Odin's own comments (posted via GITHUB_TOKEN as repo owner)
       const reviewComments = comments.filter(
         (c) => c.user !== this.config.GITHUB_REPO_OWNER
       );
@@ -227,7 +298,7 @@ export class Orchestrator {
 
       // Re-run self-review
       updatedCtx = transition(updatedCtx, "SelfReviewing");
-      this.activeTickets.set(ticketId, updatedCtx);
+      await this.setTicket(ticketId, updatedCtx);
       await this.selfReview.run(ctx.worktreePath);
 
       // Push changes — commit format matches valhalla convention
@@ -244,7 +315,7 @@ export class Orchestrator {
       );
 
       updatedCtx = transition(updatedCtx, "AwaitingReview");
-      this.activeTickets.set(ticketId, updatedCtx);
+      await this.setTicket(ticketId, updatedCtx);
 
       log.info(
         { ticketId, prNumber, round: updatedCtx.feedbackRounds },
@@ -273,7 +344,7 @@ export class Orchestrator {
         this.prMonitor.unwatch(ctx.prNumber);
       }
       await this.git.removeWorktree(ctx.branchName);
-      this.activeTickets.delete(ticketId);
+      await this.removeTicket(ticketId);
       this.poller.releaseTicket(ticketId);
 
       log.info({ ticketId }, "Ticket completed and moved to QA");
@@ -284,17 +355,17 @@ export class Orchestrator {
 
   private async getChangedFiles(cwd: string): Promise<string[]> {
     try {
-      const { stdout } = await exec("git", ["diff", "--name-only", "HEAD"], {
+      // Use git status --porcelain to catch staged, unstaged, and untracked files
+      const { stdout } = await exec("git", ["status", "--porcelain"], {
         cwd,
       });
-      return stdout.trim().split("\n").filter(Boolean);
+      return stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => line.slice(3)); // Remove status prefix (e.g. " M ", "?? ")
     } catch {
-      const { stdout } = await exec(
-        "git",
-        ["ls-files", "--others", "--exclude-standard"],
-        { cwd }
-      );
-      return stdout.trim().split("\n").filter(Boolean);
+      return [];
     }
   }
 

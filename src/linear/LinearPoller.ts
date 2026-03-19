@@ -45,7 +45,7 @@ export class LinearPoller {
       const issues = await team.issues({
         filter: {
           state: {
-            type: { in: ["backlog", "unstarted", "started"] },
+            name: { in: ["Backlog", "Ready to start", "Ready for Review"] },
           },
         },
       });
@@ -97,6 +97,10 @@ export class LinearPoller {
       log.error({ err, ticketId }, "Failed to get ticket details");
       return null;
     }
+  }
+
+  claimTicket(ticketId: string) {
+    this.knownTicketIds.add(ticketId);
   }
 
   releaseTicket(ticketId: string) {

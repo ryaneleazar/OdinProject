@@ -1,7 +1,6 @@
 export function selfReviewPrompt(params: {
   changedFiles: string[];
   lintErrors?: string;
-  typeErrors?: string;
   testErrors?: string;
 }) {
   return `You are reviewing code changes and fixing any issues found.
@@ -9,8 +8,7 @@ export function selfReviewPrompt(params: {
 ## Changed Files
 ${params.changedFiles.map((f) => `- ${f}`).join("\n")}
 
-${params.lintErrors ? `## Lint Errors\n\`\`\`\n${params.lintErrors}\n\`\`\`\n` : ""}
-${params.typeErrors ? `## Type Errors\n\`\`\`\n${params.typeErrors}\n\`\`\`\n` : ""}
+${params.lintErrors ? `## Lint / Type Errors\n\`\`\`\n${params.lintErrors}\n\`\`\`\n` : ""}
 ${params.testErrors ? `## Test Errors\n\`\`\`\n${params.testErrors}\n\`\`\`\n` : ""}
 
 ## Instructions
