@@ -67,7 +67,7 @@ odin/
 │   └── utils/
 │       ├── logger.ts                     # Pino structured logging
 │       ├── eventBus.ts                   # Typed internal pub/sub
-│       └── retry.ts                      # Exponential backoff helper
+│       └── stateStore.ts                 # Persistent state via JSON file
 ├── Dockerfile                            # Multi-stage build
 ├── docker-compose.yml                    # Production deployment config
 ├── .env                                  # Credentials and settings
@@ -126,6 +126,11 @@ The brain. Listens for events and manages the full lifecycle:
 - **Feedback** → read comments → address changes → self-review → push → notify reviewer
 - **Completion** → move to QA → delete trigger comment → clean up worktree
 
+Persists all ticket state to `odin-state.json` via the StateStore. On startup, recovers from crashes:
+- **Mid-implementation tickets** (Queued through CreatingPR) → cleans up worktree, releases ticket so the poller re-discovers it
+- **PR-stage tickets** (AwaitingReview, AddressingFeedback) → re-attaches the PR monitor so feedback continues to be handled
+- **Terminal tickets** (Completed, Failed) → cleans up leftover worktrees
+
 ### TicketStateMachine
 
 Enforces valid state transitions:
@@ -141,6 +146,10 @@ Queued → Implementing → WritingTests → SelfReviewing → CreatingPR → Aw
 ### EventBus
 
 Typed pub/sub system that decouples components. Events: `ticket:new`, `ticket:implementing`, `ticket:selfReviewing`, `ticket:creatingPR`, `ticket:awaitingReview`, `ticket:addressingFeedback`, `ticket:completed`, `ticket:failed`.
+
+### StateStore
+
+Persists active ticket state to `odin-state.json` in the workspace directory. Saves on every state transition so the Orchestrator can recover from crashes or restarts without losing track of in-flight work.
 
 ## Prerequisites
 
